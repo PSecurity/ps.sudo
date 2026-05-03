@@ -1,108 +1,173 @@
 #!/data/data/com.termux/files/usr/bin/bash
 
-#set colored=true to turn on colored error messages
-#set colored=false to turn off colored error messages
-colored=true
+# ============================================================
+# PS.Sudo - PeekSecurity
+# Wrapper sudo moderno para Termux (Magisk / KernelSU / APatch)
+# Autor: Peek | @PeekSecurity
+# GitHub: https://psecurity.github.io/PSecurity
+# ============================================================
 
-#red=1 green=2 yellow=3
-color() {
-	if [ $colored == "true" ]; then
-		echo "$(tput setaf $1)${*:2}$(tput sgr0)"
-	else
-		echo "${*:2}"
-	fi
-}
+# ====== CORES ======
+verde="\e[32m"
+vermelho="\e[31m"
+amarelo="\e[33m"
+ciano="\e[36m"
+branco="\e[1;37m"
+reset="\e[0m"
 
-show_usage() {
-	echo -e "\n`color 3 Usage:`\n"
-	echo 'sudo su [-]'
-	echo -e "  `color 2 Drop to root shell`\n"
-	echo 'sudo <command> [<args>]'
-	echo -e "  `color 2 Run command as root with optional arguments`\n"
-	exit
-}
-
-SYSBIN=/system/bin
-SYSXBIN=/system/xbin
-BB=$SYSXBIN/busybox
 PRE=/data/data/com.termux/files
 ROOT_HOME=$PRE/home/.suroot
 BINPRE=$PRE/usr/bin
-LDLP="export LD_LIBRARY_PATH=$PRE/usr/lib"
-CMDLINE="PATH=$PATH:$SYSXBIN:$SYSBIN;$LDLP;HOME=$ROOT_HOME;cd $PWD"
 
-if [ -x /magisk/.core/bin/su ]; then
-	SU=/magisk/.core/bin/su
-elif [ -x /sbin/su ]; then
-	SU=/sbin/su
-elif [ -x $SYSXBIN/su ]; then
-	SU=$SYSXBIN/su
-elif [ -x /su/bin/su ]; then
-	SU=/su/bin/su
-else
-	echo -e "\n`color 1 su` executable not found"
-	echo -e "`color 1 sudo` requires `color 1 su`\n"
-	exit
-fi
+# ====== LOCALIZA O SU DISPONÍVEL ======
+# Suporte a: Magisk (moderno), KernelSU, APatch, fallback PATH
+localizar_su() {
+  # Magisk moderno (28+)
+  if command -v su >/dev/null 2>&1; then
+    SU="su"
+    return 0
+  fi
 
-if [ ! -d $ROOT_HOME ]; then
-	if [ -x $BB ] && [ $($BB --list | grep -w mount) == "mount" ]; then
-		MOUNTEX="$BB mount"
-	elif [ -x $SYSBIN/mount ]; then
-		MOUNTEX="$SYSBIN/mount"
-	else
-		echo -e "\nCannot find `color 1 mount` executable"
-		echo -e "`color 2 Unable to setup sudo`\n"
-		exit
-	fi
-	MOUNT_RW="$MOUNTEX -o rw,remount,rw /system"
-	MOUNT_RO="$MOUNTEX -o ro,remount,ro /system"
-	if [ -x "/sbin/magisk" ]; then
-		unset LD_LIBRARY_PATH
-		$SU -c "$CMDLINE;$MOUNT_RW"
-		$SU -c "$CMDLINE;mkdir $ROOT_HOME"
-		$SU -c "$CMDLINE;chmod 700 $ROOT_HOME"
-		BASHRC="'PS1=\"# \"\nexport TERM=$TERM\n$LDLP\nexport PATH=$PATH:$SYSXBIN:$SYSBIN'"
-		$SU -c "$CMDLINE;echo -e $BASHRC > $ROOT_HOME/.bashrc"
-		$SU -c "$CMDLINE;chmod 700 $ROOT_HOME/.bashrc"
-		$SU -c "$CMDLINE;$MOUNT_RO"
-	else
-		$SU -c "$MOUNT_RW"
-		$SU -c "mkdir $ROOT_HOME"
-		$SU -c "chmod 700 $ROOT_HOME"
-		BASHRC="'PS1=\"# \"\nexport TERM=$TERM\n$LDLP\nexport PATH=$PATH:$SYSXBIN:$SYSBIN'"
-		$SU -c "echo -e $BASHRC > $ROOT_HOME/.bashrc"
-		$SU -c "chmod 700 $ROOT_HOME/.bashrc"
-		$SU -c "$MOUNT_RO"
-	fi
-fi
+  # KernelSU
+  if [ -x /data/adb/ksu/bin/su ]; then
+    SU=/data/adb/ksu/bin/su
+    return 0
+  fi
 
-ARGS=$(printf '%q ' "$@")
+  # APatch
+  if [ -x /data/adb/ap/bin/su ]; then
+    SU=/data/adb/ap/bin/su
+    return 0
+  fi
 
+  # Magisk legado
+  for path in /sbin/su /system/xbin/su /system/bin/su /su/bin/su /magisk/.core/bin/su; do
+    if [ -x "$path" ]; then
+      SU="$path"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+# ====== SETUP DO ROOT HOME (sem remount, compatível com Android 10+) ======
+setup_root_home() {
+  if [ ! -d "$ROOT_HOME" ]; then
+    $SU -c "mkdir -p $ROOT_HOME && chmod 700 $ROOT_HOME" 2>/dev/null
+
+    # .bashrc do root com PATH do Termux herdado
+    local bashrc="PS1='# '\nexport TERM=$TERM\nexport PATH=$PATH\nexport LD_LIBRARY_PATH=$PRE/usr/lib"
+    $SU -c "printf '$bashrc\n' > $ROOT_HOME/.bashrc && chmod 700 $ROOT_HOME/.bashrc" 2>/dev/null
+  fi
+}
+
+# ====== USAGE ======
+show_usage() {
+  echo -e "\n${ciano}PS.Sudo - PeekSecurity${reset}\n"
+  echo -e "${branco}Uso:${reset}"
+  echo -e "  ${amarelo}sudo su${reset}              → Shell root interativo"
+  echo -e "  ${amarelo}sudo <comando>${reset}        → Executa comando como root"
+  echo -e "  ${amarelo}sudo --check${reset}          → Verifica root disponível"
+  echo -e "  ${amarelo}sudo --info${reset}           → Info do ambiente root\n"
+  exit 0
+}
+
+# ====== VERIFICAÇÃO DE ROOT ======
+check_root() {
+  echo -e "\n${amarelo}[*] Verificando acesso root...${reset}"
+
+  if ! localizar_su; then
+    echo -e "${vermelho}[✗] su não encontrado!${reset}"
+    echo -e "${amarelo}    Instale Magisk, KernelSU ou APatch no seu dispositivo.${reset}\n"
+    exit 1
+  fi
+
+  echo -e "${verde}[✓] su encontrado: ${branco}$SU${reset}"
+
+  # Testa execução real como root
+  local uid=$($SU -c "id -u" 2>/dev/null)
+  if [ "$uid" = "0" ]; then
+    echo -e "${verde}[✓] Root funcional! UID = 0${reset}\n"
+    return 0
+  else
+    echo -e "${vermelho}[✗] su encontrado mas root negado pelo gerenciador.${reset}"
+    echo -e "${amarelo}    Verifique se o Termux tem permissão root no Magisk/KernelSU.${reset}\n"
+    exit 1
+  fi
+}
+
+# ====== INFO DO AMBIENTE ======
+show_info() {
+  echo -e "\n${ciano}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${reset}"
+  echo -e "  ${branco}📱 Info Root - PS.Sudo${reset}"
+  echo -e "${ciano}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${reset}"
+
+  if ! localizar_su; then
+    echo -e "  ${vermelho}su:${reset}        Não encontrado"
+    echo -e "${ciano}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${reset}\n"
+    exit 1
+  fi
+
+  local uid=$($SU -c "id -u" 2>/dev/null)
+  local whoami_root=$($SU -c "whoami" 2>/dev/null)
+  local kernel=$($SU -c "uname -r" 2>/dev/null)
+
+  echo -e "  ${amarelo}su:${reset}        $SU"
+  echo -e "  ${amarelo}UID root:${reset}  ${uid:-N/A}"
+  echo -e "  ${amarelo}Whoami:${reset}    ${whoami_root:-N/A}"
+  echo -e "  ${amarelo}Kernel:${reset}    ${kernel:-N/A}"
+  echo -e "  ${amarelo}Root Home:${reset} $ROOT_HOME"
+  echo -e "${ciano}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${reset}\n"
+}
+
+# ==============================
+# ====== EXECUÇÃO PRINCIPAL ======
+# ==============================
+
+# Sem argumentos → mostra uso
 if [ -z "$*" ]; then
-	show_usage
-elif [ $1 == "su" ]; then
-	CMDLINE="$CMDLINE;$BINPRE/bash"
-elif [ -x "$BINPRE/$1" ]; then
-	CMDLINE="$CMDLINE;$BINPRE/$ARGS"
-elif [ -x $SYSBIN/$1 ] || [ -x $SYSXBIN/$1 ] || [ -x $1 ]; then
-	CMDLINE="$CMDLINE;$ARGS"
+  show_usage
+fi
+
+# Flags especiais
+case "$1" in
+  --check) check_root; exit 0 ;;
+  --info)  show_info;  exit 0 ;;
+  --help|-h) show_usage ;;
+esac
+
+# Localiza su — aborta se não encontrar
+if ! localizar_su; then
+  echo -e "\n${vermelho}[!] su não encontrado.${reset}"
+  echo -e "${amarelo}    Instale Magisk, KernelSU ou APatch.${reset}\n"
+  exit 1
+fi
+
+# Setup do root home (sem remount, seguro no Android 10+)
+setup_root_home
+
+# Monta o PATH do Termux para o ambiente root
+LDLP="$PRE/usr/lib"
+CMDLINE="export HOME=$ROOT_HOME; export PATH=$PATH; export LD_LIBRARY_PATH=$LDLP; cd ${PWD}"
+
+# ====== MODO: shell root interativo ======
+if [ "$1" = "su" ]; then
+  $SU -c "$CMDLINE; exec $BINPRE/bash --rcfile $ROOT_HOME/.bashrc"
+
+# ====== MODO: comando root ======
 else
-	echo -e "\nCommand `color 1 $1` not found"
-	echo -e "`color 2 Check your spelling and try again`\n"
+  ARGS=$(printf '%q ' "$@")
+
+  # Verifica se o comando existe no Termux ou no sistema
+  if [ -x "$BINPRE/$1" ] || command -v "$1" >/dev/null 2>&1; then
+    $SU -c "$CMDLINE; $ARGS"
+  else
+    echo -e "\n${vermelho}[!] Comando '$1' não encontrado.${reset}"
+    echo -e "${amarelo}    Verifique o nome e tente novamente.${reset}\n"
+    exit 1
+  fi
 fi
 
-pre_env_chk=`$SU --help|grep -e --preserve-environment`
-
-if [ -x "/sbin/magisk" ]; then
-	unset LD_LIBRARY_PATH
-fi
-
-if [ -n "$pre_env_chk" ]; then
-        $SU --preserve-environment -c "$CMDLINE"
-else
-        $SU -c "$CMDLINE"
-fi
-
-# Reset echo
-stty sane
+# Reset do terminal
+stty sane 2>/dev/null
